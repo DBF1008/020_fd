@@ -71,9 +71,11 @@ fn print_entry_format<W: Write>(
     config: &Config,
     format: &FormatTemplate,
 ) -> io::Result<()> {
+    let meta = entry.entry_meta();
     let output = format.generate(
         entry.stripped_path(config),
         config.path_separator.as_deref(),
+        Some(&meta),
     );
     // TODO: support writing raw bytes on unix?
     write!(stdout, "{}", output.to_string_lossy())

@@ -12,7 +12,7 @@ use argmax::Command;
 
 use crate::exec::command::OutputBuffer;
 use crate::exit_codes::{ExitCode, merge_exitcodes};
-use crate::fmt::{FormatTemplate, Token};
+use crate::fmt::{EntryMeta, FormatTemplate, Token};
 
 use self::command::{execute_commands, handle_cmd_error};
 pub use self::job::{batch, job};
@@ -82,17 +82,18 @@ impl CommandSet {
         path_separator: Option<&str>,
         null_separator: bool,
         buffer_output: bool,
+        meta: Option<&EntryMeta>,
     ) -> ExitCode {
         let commands = self
             .commands
             .iter()
-            .map(|c| c.generate(input, path_separator));
+            .map(|c| c.generate(input, path_separator, meta));
         execute_commands(commands, OutputBuffer::new(null_separator), buffer_output)
     }
 
-    pub fn execute_batch<I>(&self, paths: I, limit: usize, path_separator: Option<&str>) -> ExitCode
+    pub fn execute_batch<I>(&self, entries: I, limit: usize, path_separator: Option<&str>) -> ExitCode
     where
-        I: Iterator<Item = PathBuf>,
+        I: Iterator<Item = (PathBuf, EntryMeta)>,
     {
         let builders: io::Result<Vec<_>> = self
             .commands
@@ -102,9 +103,9 @@ impl CommandSet {
 
         match builders {
             Ok(mut builders) => {
-                for path in paths {
+                for (path, meta) in entries {
                     for builder in &mut builders {
-                        if let Err(e) = builder.push(&path, path_separator) {
+                        if let Err(e) = builder.push(&path, path_separator, Some(&meta)) {
                             return handle_cmd_error(Some(&builder.cmd), e);
                         }
                     }
@@ -145,9 +146,9 @@ impl CommandBuilder {
             if arg.has_tokens() {
                 path_arg = Some(arg.clone());
             } else if path_arg.is_none() {
-                pre_args.push(arg.generate("", None));
+                pre_args.push(arg.generate("", None, None));
             } else {
-                post_args.push(arg.generate("", None));
+                post_args.push(arg.generate("", None, None));
             }
         }
 
@@ -173,12 +174,12 @@ impl CommandBuilder {
         Ok(cmd)
     }
 
-    fn push(&mut self, path: &Path, separator: Option<&str>) -> io::Result<()> {
+    fn push(&mut self, path: &Path, separator: Option<&str>, meta: Option<&EntryMeta>) -> io::Result<()> {
         if self.limit > 0 && self.count >= self.limit {
             self.finish()?;
         }
 
-        let arg = self.path_arg.generate(path, separator);
+        let arg = self.path_arg.generate(path, separator, meta);
         if !self
             .cmd
             .args_would_fit(iter::once(&arg).chain(&self.post_args))
@@ -261,10 +262,15 @@ impl CommandTemplate {
     ///
     /// Using the internal `args` field, and a supplied `input` variable, a `Command` will be
     /// build.
-    fn generate(&self, input: &Path, path_separator: Option<&str>) -> io::Result<Command> {
-        let mut cmd = Command::new(self.args[0].generate(input, path_separator));
+    fn generate(
+        &self,
+        input: &Path,
+        path_separator: Option<&str>,
+        meta: Option<&EntryMeta>,
+    ) -> io::Result<Command> {
+        let mut cmd = Command::new(self.args[0].generate(input, path_separator, meta));
         for arg in &self.args[1..] {
-            cmd.try_arg(arg.generate(input, path_separator))?;
+            cmd.try_arg(arg.generate(input, path_separator, meta))?;
         }
         Ok(cmd)
     }
@@ -278,7 +284,7 @@ mod tests {
         template
             .args
             .iter()
-            .map(|arg| arg.generate(input, None).into_string().unwrap())
+            .map(|arg| arg.generate(input, None, None).into_string().unwrap())
             .collect()
     }
 
@@ -434,7 +440,7 @@ mod tests {
         let arg = FormatTemplate::Tokens(vec![Token::Placeholder]);
         macro_rules! check {
             ($input:expr, $expected:expr) => {
-                assert_eq!(arg.generate($input, Some("#")), OsString::from($expected));
+                assert_eq!(arg.generate($input, Some("#"), None), OsString::from($expected));
             };
         }
 
@@ -449,7 +455,7 @@ mod tests {
         let arg = FormatTemplate::Tokens(vec![Token::Placeholder]);
         macro_rules! check {
             ($input:expr, $expected:expr) => {
-                assert_eq!(arg.generate($input, Some("#")), OsString::from($expected));
+                assert_eq!(arg.generate($input, Some("#"), None), OsString::from($expected));
             };
         }
 

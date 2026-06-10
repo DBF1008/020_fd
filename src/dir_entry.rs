@@ -2,11 +2,13 @@ use std::cell::OnceCell;
 use std::ffi::OsString;
 use std::fs::{FileType, Metadata};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use lscolors::{Colorable, LsColors, Style};
 
 use crate::config::Config;
-use crate::filesystem::strip_current_dir;
+use crate::filesystem::{self, strip_current_dir};
+use crate::fmt::EntryMeta;
 
 #[derive(Debug)]
 enum DirEntryInner {
@@ -85,6 +87,30 @@ impl DirEntry {
                 DirEntryInner::BrokenSymlink(path) => path.symlink_metadata().ok(),
             })
             .as_ref()
+    }
+
+    /// Construct an `EntryMeta` from this entry's metadata and file type.
+    pub fn entry_meta(&self) -> EntryMeta {
+        let size = self.metadata().map(|m| m.len());
+        let mtime = self.metadata().and_then(|m| {
+            m.modified().ok().map(|t| {
+                match t.duration_since(SystemTime::UNIX_EPOCH) {
+                    Ok(d) => d.as_secs() as i64,
+                    Err(e) => -(e.duration().as_secs() as i64),
+                }
+            })
+        });
+        let file_type_str = self
+            .file_type()
+            .map(|ft| filesystem::file_type_to_str(&ft))
+            .unwrap_or("")
+            .to_string();
+
+        EntryMeta {
+            size,
+            mtime,
+            file_type_str,
+        }
     }
 
     pub fn depth(&self) -> Option<usize> {

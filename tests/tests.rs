@@ -1732,6 +1732,100 @@ fn format() {
     );
 }
 
+/// Format with metadata placeholders: {type}
+#[test]
+fn format_type() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    // Files should have type "file"
+    te.assert_output(
+        &["a.foo", "--format", "{type}"],
+        "file",
+    );
+
+    // Directories should have type "dir"
+    te.assert_output(
+        &["-t", "d", "^one$", "--format", "{type}"],
+        "dir",
+    );
+}
+
+/// Format with {type} for symlinks (unix only)
+#[cfg(unix)]
+#[test]
+fn format_type_symlink() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    te.assert_output(
+        &["-t", "l", "--format", "{type}"],
+        "symlink",
+    );
+}
+
+/// Format with metadata placeholders: {size}
+#[test]
+fn format_size() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    // Test files created by TestEnv are empty (0 bytes)
+    te.assert_output(
+        &["a.foo", "--format", "size={size}"],
+        "size=0",
+    );
+}
+
+/// Format with {mtime} produces a valid numeric timestamp
+#[test]
+fn format_mtime() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    let output = te.assert_success_and_get_normalized_output(
+        ".",
+        &["a.foo", "--format", "{mtime}"],
+    );
+    let trimmed = output.trim();
+    assert!(
+        !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit() || c == '-'),
+        "Expected numeric timestamp, got: {trimmed}"
+    );
+}
+
+/// Format with mixed path and metadata placeholders
+#[test]
+fn format_metadata_mixed() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    te.assert_output(
+        &["a.foo", "--format", "{/} {size} {type}", "--path-separator=/"],
+        "a.foo 0 file",
+    );
+}
+
+/// --exec with metadata placeholders
+#[cfg(not(windows))]
+#[test]
+fn test_exec_metadata_type() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    te.assert_output(
+        &["a.foo", "--exec", "echo", "{type}"],
+        "file",
+    );
+}
+
+/// --exec-batch with metadata placeholder
+#[cfg(not(windows))]
+#[test]
+fn test_exec_batch_type() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+    let te = te.normalize_line(true);
+
+    te.assert_output(
+        &["-t", "f", "a.foo", "--exec-batch", "echo", "{type}"],
+        "file",
+    );
+}
+
 /// Shell script execution (--exec)
 #[test]
 fn test_exec() {

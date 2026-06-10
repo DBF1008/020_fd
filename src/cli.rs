@@ -477,6 +477,9 @@ pub struct Opts {
     ///   '{//}': parent directory
     ///   '{.}': path without file extension
     ///   '{/.}': basename without file extension
+    ///   '{size}': file size in bytes
+    ///   '{mtime}': modification time as Unix timestamp (seconds)
+    ///   '{type}': file type (file, dir, symlink, pipe, socket, block, char)
     #[arg(
         long,
         value_name = "fmt",
@@ -902,6 +905,9 @@ impl clap::Args for Exec {
                        '{//}': parent directory\n  \
                        '{.}':  path without file extension\n  \
                        '{/.}': basename without file extension\n  \
+                       '{size}':  file size in bytes\n  \
+                       '{mtime}': modification time as Unix timestamp (seconds)\n  \
+                       '{type}':  file type (file, dir, symlink, pipe, socket, block, char)\n  \
                        '{{':   literal '{' (for escaping)\n  \
                        '}}':   literal '}' (for escaping)\n\n\
                      If no placeholder is present, an implicit \"{}\" at the end is assumed.\n\n\
@@ -937,6 +943,9 @@ impl clap::Args for Exec {
                        '{//}': parent directory\n  \
                        '{.}':  path without file extension\n  \
                        '{/.}': basename without file extension\n  \
+                       '{size}':  file size in bytes\n  \
+                       '{mtime}': modification time as Unix timestamp (seconds)\n  \
+                       '{type}':  file type (file, dir, symlink, pipe, socket, block, char)\n  \
                        '{{':   literal '{' (for escaping)\n  \
                        '}}':   literal '}' (for escaping)\n\n\
                      If no placeholder is present, an implicit \"{}\" at the end is assumed.\n\n\

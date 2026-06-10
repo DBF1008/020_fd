@@ -31,11 +31,13 @@ pub fn job(
         };
 
         // Generate a command, execute it and store its exit code.
+        let meta = dir_entry.entry_meta();
         let code = cmd.execute(
             dir_entry.stripped_path(config),
             config.path_separator.as_deref(),
             config.null_separator,
             buffer_output,
+            Some(&meta),
         );
         ret = merge_exitcodes([ret, code]);
     }
@@ -48,10 +50,14 @@ pub fn batch(
     cmd: &CommandSet,
     config: &Config,
 ) -> ExitCode {
-    let paths = results
+    let entries = results
         .into_iter()
         .filter_map(|worker_result| match worker_result {
-            WorkerResult::Entry(dir_entry) => Some(dir_entry.into_stripped_path(config)),
+            WorkerResult::Entry(dir_entry) => {
+                let meta = dir_entry.entry_meta();
+                let path = dir_entry.into_stripped_path(config);
+                Some((path, meta))
+            }
             WorkerResult::Error(err) => {
                 if config.show_filesystem_errors {
                     print_error(err.to_string());
@@ -60,5 +66,5 @@ pub fn batch(
             }
         });
 
-    cmd.execute_batch(paths, config.batch_size, config.path_separator.as_deref())
+    cmd.execute_batch(entries, config.batch_size, config.path_separator.as_deref())
 }

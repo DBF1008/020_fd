@@ -21,7 +21,21 @@ pub enum Token {
     Parent,
     NoExt,
     BasenameNoExt,
+    Size,
+    ModTime,
+    FileType,
     Text(String),
+}
+
+/// Metadata fields that may be used by metadata-aware template placeholders.
+#[derive(Clone, Debug, Default)]
+pub struct EntryMeta {
+    /// File size in bytes, or None if unavailable.
+    pub size: Option<u64>,
+    /// Modification time as Unix timestamp (seconds since epoch), or None.
+    pub mtime: Option<i64>,
+    /// File type as an English word: "file", "dir", "symlink", etc.
+    pub file_type_str: String,
 }
 
 impl Display for Token {
@@ -32,6 +46,9 @@ impl Display for Token {
             Token::Parent => f.write_str("{//}")?,
             Token::NoExt => f.write_str("{.}")?,
             Token::BasenameNoExt => f.write_str("{/.}")?,
+            Token::Size => f.write_str("{size}")?,
+            Token::ModTime => f.write_str("{mtime}")?,
+            Token::FileType => f.write_str("{type}")?,
             Token::Text(ref string) => f.write_str(string)?,
         }
         Ok(())
@@ -62,7 +79,7 @@ impl FormatTemplate {
         let mut remaining = fmt;
         let mut buf = String::new();
         let placeholders = PLACEHOLDERS.get_or_init(|| {
-            AhoCorasick::new(["{{", "}}", "{}", "{/}", "{//}", "{.}", "{/.}"]).unwrap()
+            AhoCorasick::new(["{{", "}}", "{}", "{/}", "{//}", "{.}", "{/.}", "{size}", "{mtime}", "{type}"]).unwrap()
         });
         while let Some(m) = placeholders.find(remaining) {
             match m.pattern().as_u32() {
@@ -108,8 +125,14 @@ impl FormatTemplate {
 
     /// Generate a result string from this template. If path_separator is Some, then it will replace
     /// the path separator in all placeholder tokens. Fixed text and tokens are not affected by
-    /// path separator substitution.
-    pub fn generate(&self, path: impl AsRef<Path>, path_separator: Option<&str>) -> OsString {
+    /// path separator substitution. If meta is Some, metadata placeholders ({size}, {mtime}, {type})
+    /// will be expanded; otherwise they expand to empty strings.
+    pub fn generate(
+        &self,
+        path: impl AsRef<Path>,
+        path_separator: Option<&str>,
+        meta: Option<&EntryMeta>,
+    ) -> OsString {
         use Token::*;
         let path = path.as_ref();
 
@@ -130,6 +153,21 @@ impl FormatTemplate {
                         Parent => s.push(Self::replace_separator(&dirname(path), path_separator)),
                         Placeholder => {
                             s.push(Self::replace_separator(path.as_ref(), path_separator))
+                        }
+                        Size => {
+                            if let Some(size) = meta.and_then(|m| m.size) {
+                                s.push(size.to_string());
+                            }
+                        }
+                        ModTime => {
+                            if let Some(mtime) = meta.and_then(|m| m.mtime) {
+                                s.push(mtime.to_string());
+                            }
+                        }
+                        FileType => {
+                            if let Some(m) = meta {
+                                s.push(&m.file_type_str);
+                            }
                         }
                         Text(string) => s.push(string),
                     }
@@ -206,6 +244,9 @@ fn token_from_pattern_id(id: u32) -> Token {
         4 => Parent,
         5 => NoExt,
         6 => BasenameNoExt,
+        7 => Size,
+        8 => ModTime,
+        9 => FileType,
         _ => unreachable!(),
     }
 }
@@ -267,7 +308,7 @@ mod fmt_tests {
         path.push("folder");
         path.push("file.txt");
 
-        let expanded = templ.generate(&path, Some("/")).into_string().unwrap();
+        let expanded = templ.generate(&path, Some("/"), None).into_string().unwrap();
 
         assert_eq!(
             expanded,
@@ -277,5 +318,67 @@ mod fmt_tests {
             noExt=a/folder/file \
             basenameNoExt=file }"
         );
+    }
+
+    #[test]
+    fn parse_metadata_placeholders() {
+        use Token::*;
+        let templ = FormatTemplate::parse("{size}-{mtime}-{type}");
+        assert_eq!(
+            templ,
+            FormatTemplate::Tokens(vec![
+                Size,
+                Text("-".into()),
+                ModTime,
+                Text("-".into()),
+                FileType,
+            ])
+        );
+    }
+
+    #[test]
+    fn generate_with_metadata() {
+        let templ = FormatTemplate::parse("{size}-{mtime}-{type}");
+        let meta = EntryMeta {
+            size: Some(1024),
+            mtime: Some(1718000000),
+            file_type_str: "file".into(),
+        };
+        let expanded = templ.generate("test.txt", None, Some(&meta)).into_string().unwrap();
+        assert_eq!(expanded, "1024-1718000000-file");
+    }
+
+    #[test]
+    fn generate_metadata_none() {
+        let templ = FormatTemplate::parse("{size}-{mtime}-{type}");
+        let expanded = templ.generate("test.txt", None, None).into_string().unwrap();
+        assert_eq!(expanded, "--");
+    }
+
+    #[test]
+    fn generate_metadata_partial() {
+        let templ = FormatTemplate::parse("{size}-{mtime}-{type}");
+        let meta = EntryMeta {
+            size: None,
+            mtime: Some(100),
+            file_type_str: "dir".into(),
+        };
+        let expanded = templ.generate("test.txt", None, Some(&meta)).into_string().unwrap();
+        assert_eq!(expanded, "-100-dir");
+    }
+
+    #[test]
+    fn generate_mixed_path_and_metadata() {
+        let templ = FormatTemplate::parse("name={/} size={size} type={type}");
+        let meta = EntryMeta {
+            size: Some(2048),
+            mtime: None,
+            file_type_str: "file".into(),
+        };
+        let expanded = templ
+            .generate("dir/file.txt", Some("/"), Some(&meta))
+            .into_string()
+            .unwrap();
+        assert_eq!(expanded, "name=file.txt size=2048 type=file");
     }
 }

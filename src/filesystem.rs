@@ -99,6 +99,27 @@ pub fn is_pipe(_: fs::FileType) -> bool {
     false
 }
 
+/// Convert a `FileType` to an English word string.
+pub fn file_type_to_str(ft: &fs::FileType) -> &'static str {
+    if ft.is_file() {
+        "file"
+    } else if ft.is_dir() {
+        "dir"
+    } else if ft.is_symlink() {
+        "symlink"
+    } else if is_pipe(*ft) {
+        "pipe"
+    } else if is_socket(*ft) {
+        "socket"
+    } else if is_block_device(*ft) {
+        "block"
+    } else if is_char_device(*ft) {
+        "char"
+    } else {
+        ""
+    }
+}
+
 #[cfg(any(unix, target_os = "redox"))]
 pub fn osstr_to_bytes(input: &OsStr) -> Cow<'_, [u8]> {
     use std::os::unix::ffi::OsStrExt;
