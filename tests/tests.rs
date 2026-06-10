@@ -2851,3 +2851,122 @@ fn test_ignore_contain_precedence_over_root_check() {
     let expected = "";
     te.assert_output(&["--ignore-contain=CACHEDIR.TAG", "."], expected);
 }
+
+// ──────────────────────────────────────────────────────
+// No-result diagnostics
+// ──────────────────────────────────────────────────────
+
+/// When no results are found because files are hidden, stderr should mention '-H'.
+#[test]
+fn test_no_results_diagnostic_hidden() {
+    let te = TestEnv::new(&[], &[".hidden_file"]);
+    let output = te.get_output(&["hidden_file"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("-H"),
+        "expected hidden-file hint in stderr, got: {stderr}"
+    );
+}
+
+/// When no results are found because of .gitignore, stderr should mention '--no-ignore'.
+#[test]
+fn test_no_results_diagnostic_gitignore() {
+    let te = TestEnv::new(&[], &["ignored.log"]);
+    // Write a .gitignore that excludes the file.
+    fs::write(te.test_root().join(".gitignore"), "*.log\n").unwrap();
+    let output = te.get_output(&["ignored.log"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--no-ignore"),
+        "expected gitignore hint in stderr, got: {stderr}"
+    );
+}
+
+/// When no results are found because of --type filter, stderr should mention 'file type'.
+#[test]
+fn test_no_results_diagnostic_type_filter() {
+    let te = TestEnv::new(&[], &["myfile.txt"]);
+    // Search for the file but ask for directories only.
+    let output = te.get_output(&["--type", "d", "myfile"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("file type"),
+        "expected type-filter hint in stderr, got: {stderr}"
+    );
+}
+
+/// When no results due to --max-depth, stderr should mention '--max-depth'.
+#[test]
+fn test_no_results_diagnostic_depth() {
+    let te = TestEnv::new(&["deep/nested"], &["deep/nested/target.txt"]);
+    let output = te.get_output(&["--max-depth", "1", "target"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--max-depth"),
+        "expected max-depth hint in stderr, got: {stderr}"
+    );
+}
+
+/// When no results due to --extension filter, stderr should mention '--extension'.
+#[test]
+fn test_no_results_diagnostic_extension() {
+    let te = TestEnv::new(&[], &["file.txt"]);
+    let output = te.get_output(&["-e", "xyz", "file"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("extension"),
+        "expected extension hint in stderr, got: {stderr}"
+    );
+}
+
+/// Quiet mode must NOT show diagnostics.
+#[test]
+fn test_no_results_diagnostic_quiet_suppressed() {
+    let te = TestEnv::new(&[], &["a.foo"]);
+    let output = te.get_output(&["--quiet", "nonexistent_pattern"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("[fd note]"),
+        "quiet mode should suppress diagnostics, got: {stderr}"
+    );
+}
+
+/// Exec mode must NOT show diagnostics.
+#[test]
+fn test_no_results_diagnostic_exec_suppressed() {
+    let te = TestEnv::new(&[], &["a.foo"]);
+    let output = te.get_output(&["nonexistent_pattern", "-x", "echo"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("[fd note]"),
+        "exec mode should suppress diagnostics, got: {stderr}"
+    );
+}
+
+/// When results ARE found, no diagnostic should appear.
+#[test]
+fn test_no_results_diagnostic_not_shown_on_match() {
+    let te = TestEnv::new(&[], &["a.foo"]);
+    let output = te.get_output(&["a.foo"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("[fd note]"),
+        "diagnostics should not appear when results are found, got: {stderr}"
+    );
+}
+
+/// When --ignore-contain skips directories, stderr should mention '--ignore-contain'.
+#[test]
+fn test_no_results_diagnostic_ignore_contain() {
+    let te = TestEnv::new(
+        &["data"],
+        &["data/result.txt", "data/CACHEDIR.TAG"],
+    );
+    // Search for files inside the ignored directory.
+    let output = te.get_output(&["--ignore-contain=CACHEDIR.TAG", "result"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--ignore-contain"),
+        "expected ignore-contain hint in stderr, got: {stderr}"
+    );
+}

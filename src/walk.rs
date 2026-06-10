@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::mem;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,6 +42,127 @@ pub enum WorkerResult {
     // to box the Entry variant
     Entry(DirEntry),
     Error(ignore::Error),
+}
+
+/// Atomic counters tracking how many entries each filter dimension rejected.
+/// Used to produce diagnostic output when a search yields no results.
+#[derive(Default)]
+struct FilterCounters {
+    /// Total entries the walker yielded (excluding depth-0 root and errors).
+    total_entries_seen: AtomicUsize,
+    filtered_by_pattern: AtomicUsize,
+    filtered_by_extension: AtomicUsize,
+    filtered_by_type: AtomicUsize,
+    filtered_by_size: AtomicUsize,
+    filtered_by_time: AtomicUsize,
+    filtered_by_min_depth: AtomicUsize,
+    #[cfg(unix)]
+    filtered_by_owner: AtomicUsize,
+}
+
+impl FilterCounters {
+    /// Print diagnostic hints to stderr explaining why no results were found.
+    fn print_diagnostics(&self, config: &Config) {
+        let total = self.total_entries_seen.load(Ordering::Relaxed);
+
+        // Collect per-filter counts with human-readable descriptions.
+        let mut filter_hits: Vec<(usize, &str)> = Vec::new();
+
+        let add = |hits: &mut Vec<(usize, &str)>, counter: &AtomicUsize, msg: &'static str| {
+            let n = counter.load(Ordering::Relaxed);
+            if n > 0 {
+                hits.push((n, msg));
+            }
+        };
+        add(
+            &mut filter_hits,
+            &self.filtered_by_pattern,
+            "pattern (check search pattern or use '--fixed-strings')",
+        );
+        add(
+            &mut filter_hits,
+            &self.filtered_by_extension,
+            "extension filter (check '-e/--extension')",
+        );
+        add(
+            &mut filter_hits,
+            &self.filtered_by_type,
+            "file type (check '-t/--type')",
+        );
+        add(
+            &mut filter_hits,
+            &self.filtered_by_size,
+            "size constraint (check '-S/--size')",
+        );
+        add(
+            &mut filter_hits,
+            &self.filtered_by_time,
+            "time constraint (check '--changed-within/--changed-before')",
+        );
+        add(
+            &mut filter_hits,
+            &self.filtered_by_min_depth,
+            "minimum depth (check '--min-depth')",
+        );
+        #[cfg(unix)]
+        add(
+            &mut filter_hits,
+            &self.filtered_by_owner,
+            "owner filter (check '-o/--owner')",
+        );
+
+        // Sort by count descending so the most likely culprit appears first.
+        filter_hits.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Build config-based hints for filters handled by the walker itself
+        // (hidden, ignore, depth, exclude, ignore-contain) which we cannot count directly.
+        let mut config_hints: Vec<&str> = Vec::new();
+        if config.ignore_hidden {
+            config_hints.push("hidden files/directories are excluded (use '-H' to include them)");
+        }
+        if config.read_vcsignore {
+            config_hints.push(".gitignore rules are active (use '-I' or '--no-ignore' to skip)");
+        }
+        if config.read_fdignore {
+            config_hints
+                .push(".fdignore rules are active (use '-I' or '--no-ignore' to skip)");
+        }
+        if config.max_depth.is_some() {
+            config_hints.push("search depth is limited (adjust or remove '--max-depth')");
+        }
+        if !config.exclude_patterns.is_empty() {
+            config_hints.push("exclude patterns are active (check '-E/--exclude')");
+        }
+        if !config.ignore_contain.is_empty() {
+            config_hints.push(
+                "directories with marker files are skipped (check '--ignore-contain')",
+            );
+        }
+
+        // Nothing useful to report — both counters and config hints are empty.
+        if filter_hits.is_empty() && config_hints.is_empty() {
+            return;
+        }
+
+        eprintln!("[fd note]: No results found. Possible reasons:");
+
+        if total == 0 && !config_hints.is_empty() {
+            // The walker itself returned nothing — config-level filters are the prime suspects.
+            for hint in &config_hints {
+                eprintln!("  {hint}");
+            }
+        } else {
+            // We saw entries but every one was rejected by an in-callback filter.
+            for (n, desc) in &filter_hits {
+                eprintln!("  {n} entries filtered by {desc}");
+            }
+            // Still mention config hints because walker-level filters may have also
+            // contributed (e.g. hidden files never reached the callback at all).
+            for hint in &config_hints {
+                eprintln!("  {hint}");
+            }
+        }
+    }
 }
 
 /// A batch of WorkerResults to send over a channel.
@@ -134,6 +255,8 @@ struct ReceiverBuffer<'a, W> {
     quit_flag: &'a AtomicBool,
     /// The ^C notifier.
     interrupt_flag: &'a AtomicBool,
+    /// Per-filter rejection counters (shared with sender threads).
+    filter_counters: &'a FilterCounters,
     /// Receiver for worker results.
     rx: Receiver<Batch>,
     /// Standard output.
@@ -161,6 +284,7 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
             config,
             quit_flag,
             interrupt_flag,
+            filter_counters: &state.filter_counters,
             rx,
             stdout,
             mode: ReceiverMode::Buffering,
@@ -288,6 +412,9 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
         if self.config.quiet {
             Err(ExitCode::HasResults(self.num_results > 0))
         } else {
+            if self.num_results == 0 {
+                self.filter_counters.print_diagnostics(self.config);
+            }
             Err(ExitCode::Success)
         }
     }
@@ -312,6 +439,8 @@ struct WorkerState {
     quit_flag: Arc<AtomicBool>,
     /// Flag specifically for quitting due to ^C
     interrupt_flag: Arc<AtomicBool>,
+    /// Per-filter rejection counters for no-result diagnostics.
+    filter_counters: FilterCounters,
 }
 
 impl WorkerState {
@@ -324,6 +453,7 @@ impl WorkerState {
             config,
             quit_flag,
             interrupt_flag,
+            filter_counters: FilterCounters::default(),
         }
     }
 
@@ -445,6 +575,7 @@ impl WorkerState {
             let patterns = &self.patterns;
             let config = &self.config;
             let quit_flag = self.quit_flag.as_ref();
+            let counters = &self.filter_counters;
 
             let mut limit = 0x100;
             if let Some(cmd) = &config.command
@@ -515,9 +646,16 @@ impl WorkerState {
                     }
                 };
 
+                counters
+                    .total_entries_seen
+                    .fetch_add(1, Ordering::Relaxed);
+
                 if let Some(min_depth) = config.min_depth
                     && entry.depth().is_none_or(|d| d < min_depth)
                 {
+                    counters
+                        .filtered_by_min_depth
+                        .fetch_add(1, Ordering::Relaxed);
                     return WalkState::Continue;
                 }
 
@@ -530,6 +668,9 @@ impl WorkerState {
                     .iter()
                     .all(|pat| pat.is_match(&filesystem::osstr_to_bytes(search_str.as_ref())))
                 {
+                    counters
+                        .filtered_by_pattern
+                        .fetch_add(1, Ordering::Relaxed);
                     return WalkState::Continue;
                 }
 
@@ -537,9 +678,15 @@ impl WorkerState {
                 if let Some(ref exts_regex) = config.extensions {
                     if let Some(path_str) = entry_path.file_name() {
                         if !exts_regex.is_match(&filesystem::osstr_to_bytes(path_str)) {
+                            counters
+                                .filtered_by_extension
+                                .fetch_add(1, Ordering::Relaxed);
                             return WalkState::Continue;
                         }
                     } else {
+                        counters
+                            .filtered_by_extension
+                            .fetch_add(1, Ordering::Relaxed);
                         return WalkState::Continue;
                     }
                 }
@@ -548,6 +695,9 @@ impl WorkerState {
                 if let Some(ref file_types) = config.file_types
                     && file_types.should_ignore(&entry)
                 {
+                    counters
+                        .filtered_by_type
+                        .fetch_add(1, Ordering::Relaxed);
                     return WalkState::Continue;
                 }
 
@@ -556,9 +706,15 @@ impl WorkerState {
                     if let Some(ref owner_constraint) = config.owner_constraint {
                         if let Some(metadata) = entry.metadata() {
                             if !owner_constraint.matches(metadata) {
+                                counters
+                                    .filtered_by_owner
+                                    .fetch_add(1, Ordering::Relaxed);
                                 return WalkState::Continue;
                             }
                         } else {
+                            counters
+                                .filtered_by_owner
+                                .fetch_add(1, Ordering::Relaxed);
                             return WalkState::Continue;
                         }
                     }
@@ -574,12 +730,21 @@ impl WorkerState {
                                 .iter()
                                 .any(|sc| !sc.is_within(file_size))
                             {
+                                counters
+                                    .filtered_by_size
+                                    .fetch_add(1, Ordering::Relaxed);
                                 return WalkState::Continue;
                             }
                         } else {
+                            counters
+                                .filtered_by_size
+                                .fetch_add(1, Ordering::Relaxed);
                             return WalkState::Continue;
                         }
                     } else {
+                        counters
+                            .filtered_by_size
+                            .fetch_add(1, Ordering::Relaxed);
                         return WalkState::Continue;
                     }
                 }
@@ -596,6 +761,9 @@ impl WorkerState {
                             .all(|tf| tf.applies_to(&modified));
                     }
                     if !matched {
+                        counters
+                            .filtered_by_time
+                            .fetch_add(1, Ordering::Relaxed);
                         return WalkState::Continue;
                     }
                 }
