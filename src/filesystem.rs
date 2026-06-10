@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 #[cfg(any(unix, target_os = "redox"))]
 use std::os::unix::fs::FileTypeExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use normpath::PathExt;
 
@@ -135,9 +135,69 @@ pub fn default_path_separator() -> Option<String> {
     None
 }
 
+/// Replace the path separator in the given path with a custom separator string.
+///
+/// If `path_separator` is `None`, returns a borrowed `Cow` of the input (zero-cost).
+/// Otherwise, iterates through `Path::components()` and rebuilds the path with the
+/// custom separator, correctly handling Windows prefixes (UNC, drive letters) and root
+/// directories.
+pub fn replace_path_separator<'a>(
+    path: &'a OsStr,
+    path_separator: Option<&str>,
+) -> Cow<'a, OsStr> {
+    // fast-path — no replacement necessary
+    let Some(path_separator) = path_separator else {
+        return Cow::Borrowed(path);
+    };
+
+    let mut out = OsString::with_capacity(path.len());
+    let mut components = Path::new(path).components().peekable();
+
+    while let Some(comp) = components.next() {
+        match comp {
+            // Absolute paths on Windows are tricky.  A Prefix component is usually a drive
+            // letter or UNC path, and is usually followed by RootDir. There are also
+            // "verbatim" prefixes beginning with "\\?\" that skip normalization. We choose to
+            // ignore verbatim path prefixes here because they're very rare, might be
+            // impossible to reach here, and there's no good way to deal with them. If users
+            // are doing something advanced involving verbatim windows paths, they can do their
+            // own output filtering with a tool like sed.
+            Component::Prefix(prefix) => {
+                if let Prefix::UNC(server, share) = prefix.kind() {
+                    // Prefix::UNC is a parsed version of '\\server\share'
+                    out.push(path_separator);
+                    out.push(path_separator);
+                    out.push(server);
+                    out.push(path_separator);
+                    out.push(share);
+                } else {
+                    // All other Windows prefix types are rendered as-is. This results in e.g. "C:" for
+                    // drive letters. DeviceNS and Verbatim* prefixes won't have backslashes converted,
+                    // but they're not returned by directories fd can search anyway so we don't worry
+                    // about them.
+                    out.push(comp.as_os_str());
+                }
+            }
+
+            // Root directory is always replaced with the custom separator.
+            Component::RootDir => out.push(path_separator),
+
+            // Everything else is joined normally, with a trailing separator if we're not last
+            _ => {
+                out.push(comp.as_os_str());
+                if components.peek().is_some() {
+                    out.push(path_separator);
+                }
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::strip_current_dir;
+    use super::{replace_path_separator, strip_current_dir};
+    use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
     #[test]
@@ -152,5 +212,50 @@ mod tests {
             strip_current_dir(Path::new("foo/bar/baz")),
             Path::new("foo/bar/baz")
         );
+    }
+
+    #[test]
+    fn replace_separator_none_is_noop() {
+        let path = OsStr::new("foo/bar/baz");
+        let result = replace_path_separator(path, None);
+        // Should return Borrowed (zero-cost)
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*result, path);
+    }
+
+    #[test]
+    fn replace_separator_basic() {
+        let result = replace_path_separator(OsStr::new("foo/bar/baz"), Some("#"));
+        assert_eq!(result, OsString::from("foo#bar#baz"));
+    }
+
+    #[test]
+    fn replace_separator_single_component() {
+        let result = replace_path_separator(OsStr::new("foo"), Some("#"));
+        assert_eq!(result, OsString::from("foo"));
+    }
+
+    #[test]
+    fn replace_separator_empty() {
+        let result = replace_path_separator(OsStr::new(""), Some("#"));
+        assert_eq!(result, OsString::from(""));
+    }
+
+    #[test]
+    fn replace_separator_absolute() {
+        let result = replace_path_separator(OsStr::new("/foo/bar"), Some("="));
+        assert_eq!(result, OsString::from("=foo=bar"));
+    }
+
+    #[test]
+    fn replace_separator_multi_char() {
+        let result = replace_path_separator(OsStr::new("a/b/c"), Some("::"));
+        assert_eq!(result, OsString::from("a::b::c"));
+    }
+
+    #[test]
+    fn replace_separator_root_only() {
+        let result = replace_path_separator(OsStr::new("/"), Some("#"));
+        assert_eq!(result, OsString::from("#"));
     }
 }

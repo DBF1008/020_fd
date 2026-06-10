@@ -1,16 +1,12 @@
-use std::borrow::Cow;
 use std::io::{self, Write};
 
 use lscolors::{Indicator, LsColors, Style};
 
 use crate::config::Config;
 use crate::dir_entry::DirEntry;
+use crate::filesystem::replace_path_separator;
 use crate::fmt::FormatTemplate;
 use crate::hyperlink::PathUrl;
-
-fn replace_path_separator(path: &str, new_path_separator: &str) -> String {
-    path.replace(std::path::MAIN_SEPARATOR, new_path_separator)
-}
 
 // TODO: this function is performance critical and can probably be optimized
 pub fn print_entry<W: Write>(stdout: &mut W, entry: &DirEntry, config: &Config) -> io::Result<()> {
@@ -86,33 +82,30 @@ fn print_entry_colorized<W: Write>(
     config: &Config,
     ls_colors: &LsColors,
 ) -> io::Result<()> {
-    // Split the path between the parent and the last component
-    let mut offset = 0;
     let path = entry.stripped_path(config);
-    let path_str = path.to_string_lossy();
 
-    if let Some(parent) = path.parent() {
-        offset = parent.to_string_lossy().len();
-        for c in path_str[offset..].chars() {
-            if std::path::is_separator(c) {
-                offset += c.len_utf8();
-            } else {
-                break;
-            }
-        }
-    }
+    // Apply separator replacement to the full path (returns Cow::Borrowed
+    // when path_separator is None, so zero-cost in the common case).
+    let replaced = replace_path_separator(
+        path.as_os_str(),
+        config.path_separator.as_deref(),
+    );
+    let path_str = replaced.to_string_lossy();
+
+    // Determine where the filename starts in the replaced string.
+    // The filename never contains separators, so it is unaffected by
+    // replacement and always occupies the final bytes of the result.
+    let offset = path
+        .file_name()
+        .map(|name| path_str.len() - name.to_string_lossy().len())
+        .unwrap_or(0);
 
     if offset > 0 {
-        let mut parent_str = Cow::from(&path_str[..offset]);
-        if let Some(ref separator) = config.path_separator {
-            *parent_str.to_mut() = replace_path_separator(&parent_str, separator);
-        }
-
         let style = ls_colors
             .style_for_indicator(Indicator::Directory)
             .map(Style::to_nu_ansi_term_style)
             .unwrap_or_default();
-        write!(stdout, "{}", style.paint(parent_str))?;
+        write!(stdout, "{}", style.paint(&path_str[..offset]))?;
     }
 
     let style = entry
@@ -138,11 +131,11 @@ fn print_entry_uncolorized_base<W: Write>(
     config: &Config,
 ) -> io::Result<()> {
     let path = entry.stripped_path(config);
-
-    let mut path_string = path.to_string_lossy();
-    if let Some(ref separator) = config.path_separator {
-        *path_string.to_mut() = replace_path_separator(&path_string, separator);
-    }
+    let replaced = replace_path_separator(
+        path.as_os_str(),
+        config.path_separator.as_deref(),
+    );
+    let path_string = replaced.to_string_lossy();
     write!(stdout, "{path_string}")?;
     print_trailing_slash(stdout, entry, config, None)
 }

@@ -1,14 +1,14 @@
 mod input;
 
-use std::borrow::Cow;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
-use std::path::{Component, Path, Prefix};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
 
 use self::input::{basename, dirname, remove_extension};
+use crate::filesystem::replace_path_separator;
 
 /// Designates what should be written to a buffer
 ///
@@ -118,18 +118,22 @@ impl FormatTemplate {
                 let mut s = OsString::new();
                 for token in tokens {
                     match token {
-                        Basename => s.push(Self::replace_separator(basename(path), path_separator)),
-                        BasenameNoExt => s.push(Self::replace_separator(
+                        Basename => {
+                            s.push(replace_path_separator(basename(path), path_separator))
+                        }
+                        BasenameNoExt => s.push(replace_path_separator(
                             &remove_extension(basename(path).as_ref()),
                             path_separator,
                         )),
-                        NoExt => s.push(Self::replace_separator(
+                        NoExt => s.push(replace_path_separator(
                             &remove_extension(path),
                             path_separator,
                         )),
-                        Parent => s.push(Self::replace_separator(&dirname(path), path_separator)),
+                        Parent => {
+                            s.push(replace_path_separator(&dirname(path), path_separator))
+                        }
                         Placeholder => {
-                            s.push(Self::replace_separator(path.as_ref(), path_separator))
+                            s.push(replace_path_separator(path.as_ref(), path_separator))
                         }
                         Text(string) => s.push(string),
                     }
@@ -138,61 +142,6 @@ impl FormatTemplate {
             }
             Self::Text(ref text) => OsString::from(text),
         }
-    }
-
-    /// Replace the path separator in the input with the custom separator string. If path_separator
-    /// is None, simply return a borrowed Cow<OsStr> of the input. Otherwise, the input is
-    /// interpreted as a Path and its components are iterated through and re-joined into a new
-    /// OsString.
-    fn replace_separator<'a>(path: &'a OsStr, path_separator: Option<&str>) -> Cow<'a, OsStr> {
-        // fast-path - no replacement necessary
-        if path_separator.is_none() {
-            return Cow::Borrowed(path);
-        }
-
-        let path_separator = path_separator.unwrap();
-        let mut out = OsString::with_capacity(path.len());
-        let mut components = Path::new(path).components().peekable();
-
-        while let Some(comp) = components.next() {
-            match comp {
-                // Absolute paths on Windows are tricky.  A Prefix component is usually a drive
-                // letter or UNC path, and is usually followed by RootDir. There are also
-                // "verbatim" prefixes beginning with "\\?\" that skip normalization. We choose to
-                // ignore verbatim path prefixes here because they're very rare, might be
-                // impossible to reach here, and there's no good way to deal with them. If users
-                // are doing something advanced involving verbatim windows paths, they can do their
-                // own output filtering with a tool like sed.
-                Component::Prefix(prefix) => {
-                    if let Prefix::UNC(server, share) = prefix.kind() {
-                        // Prefix::UNC is a parsed version of '\\server\share'
-                        out.push(path_separator);
-                        out.push(path_separator);
-                        out.push(server);
-                        out.push(path_separator);
-                        out.push(share);
-                    } else {
-                        // All other Windows prefix types are rendered as-is. This results in e.g. "C:" for
-                        // drive letters. DeviceNS and Verbatim* prefixes won't have backslashes converted,
-                        // but they're not returned by directories fd can search anyway so we don't worry
-                        // about them.
-                        out.push(comp.as_os_str());
-                    }
-                }
-
-                // Root directory is always replaced with the custom separator.
-                Component::RootDir => out.push(path_separator),
-
-                // Everything else is joined normally, with a trailing separator if we're not last
-                _ => {
-                    out.push(comp.as_os_str());
-                    if components.peek().is_some() {
-                        out.push(path_separator);
-                    }
-                }
-            }
-        }
-        Cow::Owned(out)
     }
 }
 
