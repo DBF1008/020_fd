@@ -2547,21 +2547,84 @@ fn test_max_results() {
          one/two/c.foo",
     );
 
-    // Limited to one result. We could find either C.Foo2 or c.foo
-    let assert_just_one_result_with_option = |option| {
-        let output = te.assert_success_and_get_output(".", &[option, "c.foo"]);
-        let stdout = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .replace(&std::path::MAIN_SEPARATOR.to_string(), "/");
-        assert!(stdout == "one/two/C.Foo2" || stdout == "one/two/c.foo");
-    };
-    assert_just_one_result_with_option("--max-results=1");
-    assert_just_one_result_with_option("-1");
+    // Limited to one result. Should deterministically return the
+    // lexicographically first match.
+    te.assert_output(&["--max-results=1", "c.foo"], "one/two/C.Foo2");
+    te.assert_output(&["-1", "c.foo"], "one/two/C.Foo2");
 
     // check that --max-results & -1 conflict with --exec
     te.assert_failure(&["thing", "--max-results=0", "--exec=cat"]);
     te.assert_failure(&["thing", "-1", "--exec=cat"]);
     te.assert_failure(&["thing", "--max-results=1", "-1", "--exec=cat"]);
+}
+
+/// Regression test: --max-results should always return the lexicographically
+/// first N results, regardless of thread count or search path order.
+#[test]
+fn test_max_results_deterministic() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+
+    // max_results=3 from 6 "foo" matches: should return the 3 lexicographically first
+    te.assert_output(
+        &["--max-results=3", "foo"],
+        "a.foo
+         one/b.foo
+         one/two/C.Foo2",
+    );
+
+    // max_results=4 from 6 "foo" matches
+    te.assert_output(
+        &["--max-results=4", "foo"],
+        "a.foo
+         one/b.foo
+         one/two/C.Foo2
+         one/two/c.foo",
+    );
+
+    // max_results exceeds total matches: all results returned
+    te.assert_output(
+        &["--max-results=100", "foo"],
+        "a.foo
+         one/b.foo
+         one/two/c.foo
+         one/two/C.Foo2
+         one/two/three/d.foo
+         one/two/three/directory_foo/",
+    );
+
+    // -1 should also be deterministic
+    te.assert_output(&["-1", "foo"], "a.foo");
+
+    // max_results with --absolute-path
+    let (te_abs, abs_path) = get_test_env_with_abs_path(DEFAULT_DIRS, DEFAULT_FILES);
+    te_abs.assert_output(
+        &["--absolute-path", "--max-results=2", "foo"],
+        &format!(
+            "{abs_path}/a.foo
+             {abs_path}/one/b.foo",
+        ),
+    );
+
+    // Multiple search paths: results from all paths sorted together
+    let dirs = &["dir_a", "dir_b", "dir_b/sub"];
+    let files = &[
+        "dir_a/x.txt",
+        "dir_a/y.txt",
+        "dir_b/a.txt",
+        "dir_b/sub/b.txt",
+    ];
+    let te_multi = TestEnv::new(dirs, files);
+    te_multi.assert_output(
+        &["--max-results=2", "txt", "dir_a", "dir_b"],
+        "dir_a/x.txt
+         dir_a/y.txt",
+    );
+    te_multi.assert_output(
+        &["--max-results=3", "txt", "dir_a", "dir_b"],
+        "dir_a/x.txt
+         dir_a/y.txt
+         dir_b/a.txt",
+    );
 }
 
 /// Filenames with non-utf8 paths are passed to the executed program unchanged

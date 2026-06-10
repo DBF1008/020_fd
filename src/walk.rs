@@ -182,14 +182,20 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
 
     /// Receive the next worker result.
     fn recv(&self) -> Result<Batch, RecvTimeoutError> {
-        match self.mode {
-            ReceiverMode::Buffering => {
-                // Wait at most until we should switch to streaming
-                self.rx.recv_deadline(self.deadline)
-            }
-            ReceiverMode::Streaming => {
-                // Wait however long it takes for a result
-                Ok(self.rx.recv()?)
+        if self.config.max_results.is_some() {
+            // When max_results is set, always buffer all results for
+            // deterministic sorting. Use blocking recv (no deadline).
+            Ok(self.rx.recv()?)
+        } else {
+            match self.mode {
+                ReceiverMode::Buffering => {
+                    // Wait at most until we should switch to streaming
+                    self.rx.recv_deadline(self.deadline)
+                }
+                ReceiverMode::Streaming => {
+                    // Wait however long it takes for a result
+                    Ok(self.rx.recv()?)
+                }
             }
         }
     }
@@ -208,7 +214,9 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
                             match self.mode {
                                 ReceiverMode::Buffering => {
                                     self.buffer.push(dir_entry);
-                                    if self.buffer.len() > MAX_BUFFER_LENGTH {
+                                    if self.config.max_results.is_none()
+                                        && self.buffer.len() > MAX_BUFFER_LENGTH
+                                    {
                                         self.stream()?;
                                     }
                                 }
@@ -218,11 +226,6 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
                             }
 
                             self.num_results += 1;
-                            if let Some(max_results) = self.config.max_results
-                                && self.num_results >= max_results
-                            {
-                                return self.stop();
-                            }
                         }
                         WorkerResult::Error(err) => {
                             if self.config.show_filesystem_errors {
@@ -282,6 +285,9 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
     fn stop(&mut self) -> Result<(), ExitCode> {
         if self.mode == ReceiverMode::Buffering {
             self.buffer.sort();
+            if let Some(max_results) = self.config.max_results {
+                self.buffer.truncate(max_results);
+            }
             self.stream()?;
         }
 
