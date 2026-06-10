@@ -297,7 +297,7 @@ impl TestEnv {
         self.assert_error_subdirectory(".", args, Some(expected))
     }
 
-    fn run_command(&self, path: &Path, args: &[&str]) -> process::Output {
+    pub fn run_command(&self, path: &Path, args: &[&str]) -> process::Output {
         // Setup *fd* command.
         let mut cmd = process::Command::new(&self.fd_exe);
         cmd.current_dir(self.temp_dir.path().join(path));
